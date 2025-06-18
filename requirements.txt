@@ -1,0 +1,9 @@
+python-telegram-bot
+telethon
+yfinance
+pandas
+pandas_ta
+openai
+beautifulsoup4
+requests
+python-dotenv
