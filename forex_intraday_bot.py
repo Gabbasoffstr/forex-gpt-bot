@@ -1,12 +1,14 @@
 import json
 import logging
 import requests
+import time
 from datetime import datetime, timedelta
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.error import Conflict
 from telethon.sync import TelegramClient
 import asyncio
 import uuid
@@ -311,7 +313,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if context.job_queue is None:
         logger.error("Job queue не инициализирован")
-        await update.message.reply_text("Ошибка: Job queue не работает. Проверьте токен и конфигурацию бота.")
+        await update.message.reply_text("Ошибка: Job queue не работает. Проверьте конфигурацию бота.")
         return
     context.job_queue.run_repeating(check_signals, interval=CHECK_INTERVAL, first=1, data={"chat_id": chat_id})
     context.job_queue.run_repeating(check_trade_closures, interval=CHECK_INTERVAL, first=30, data={"chat_id": chat_id})
@@ -340,15 +342,27 @@ async def stats_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Запуск приложения
 def main():
-    try:
-        app = Application.builder().token(BOT_TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("stats", stats))
-        app.add_handler(CommandHandler("stats_chart", stats_chart))
-        app.run_polling()
-    except Exception as e:
-        logger.error(f"Ошибка инициализации приложения: {e}")
-        raise
+    logger.info(f"Запуск бота с токеном: {BOT_TOKEN[:10]}...")
+    retry_count = 3
+    for attempt in range(retry_count):
+        try:
+            app = Application.builder().token(BOT_TOKEN).get_updates_timeout(30).build()
+            logger.info("Application успешно инициализирован")
+            app.add_handler(CommandHandler("start", start))
+            app.add_handler(CommandHandler("stats", stats))
+            app.add_handler(CommandHandler("stats_chart", stats_chart))
+            app.run_polling(allowed_updates=Update.ALL_TYPES)
+            break
+        except Conflict as e:
+            logger.warning(f"Конфликт getUpdates (попытка {attempt + 1}/{retry_count}): {e}")
+            if attempt < retry_count - 1:
+                time.sleep(5)  # Ждем перед повторной попыткой
+            else:
+                logger.error("Не удалось устранить конфликт getUpdates")
+                raise
+        except Exception as e:
+            logger.error(f"Ошибка инициализации: {e}")
+            raise
 
 if __name__ == "__main__":
     main()
