@@ -338,7 +338,17 @@ async def check_signals(context: ContextTypes.DEFAULT_TYPE):
 # Команды Telegram
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if context.job_queue is None:
+    job_queue = context.application.job_queue
+
+    if job_queue is None:
+        logger.error("Job queue не инициализирован")
+        await update.message.reply_text("Ошибка: очередь задач не работает.")
+        return
+
+    job_queue.run_repeating(check_signals, interval=CHECK_INTERVAL, first=1, data={"chat_id": chat_id})
+    job_queue.run_repeating(check_trade_closures, interval=CHECK_INTERVAL, first=30, data={"chat_id": chat_id})
+    await update.message.reply_text("Бот запущен! Проверка сигналов каждые 5 минут.")
+
         logger.error("Job queue не инициализирован")
         await update.message.reply_text("Ошибка: Job queue не работает. Проверьте конфигурацию бота.")
         return
