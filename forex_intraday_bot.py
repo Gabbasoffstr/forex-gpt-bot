@@ -385,7 +385,7 @@ def main():
             app.add_handler(CommandHandler("start", start))
             app.add_handler(CommandHandler("stats", stats))
             app.add_handler(CommandHandler("stats_chart", stats_chart))
-            app.run_polling(poll_interval=1.0, timeout=30, allowed_updates=Update.ALL_TYPES)
+            app.run_polling(poll_interval=1, timeout=10)
             break
         except Conflict as e:
             logger.warning(f"Конфликт getUpdates (попытка {attempt + 1}/{retry_count}): {e}")
