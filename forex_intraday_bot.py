@@ -12,7 +12,7 @@ import asyncio
 import uuid
 from dotenv import load_dotenv
 import os
-import MetaTrader5 as mt5
+import requests
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -42,12 +42,7 @@ last_signal_id = {pair: None for pair in PAIRS}
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализация MT5
-if not mt5.initialize():
-    logger.error("Ошибка инициализации MetaTrader5")
-    quit()
-
-# Календарь новостей (оставляем как есть)
+# Календарь новостей
 def get_economic_calendar():
     try:
         response = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json")
@@ -82,25 +77,21 @@ async def parse_telegram_signals(pair):
         logger.error(f"Ошибка парсинга Telegram: {e}")
         return None
 
-# Мультитаймфреймовый анализ с MT5
+# Мультитаймфреймовый анализ с локальными CSV
 def get_intraday_signal(pair):
     try:
-        # Получение данных для разных таймфреймов
-        def fetch_mt5_data(symbol, timeframe, count):
-            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
-            if not rates:
-                logger.error(f"Нет данных MT5 для {symbol}")
-                return None
-            df = pd.DataFrame(rates)
+        def load_local_data(symbol, timeframe):
+            file = f"data/{symbol}_{timeframe}.csv"
+            df = pd.read_csv(file)
             df["time"] = pd.to_datetime(df["time"], unit="s")
             df.set_index("time", inplace=True)
-            df = df[["open", "high", "low", "close", "tick_volume"]]
-            return df.astype(float)
+            return df[["open", "high", "low", "close", "tick_volume"]].astype(float)
 
-        data_5m = fetch_mt5_data(pair, mt5.TIMEFRAME_M5, 100)  # ~8 часов
-        data_15m = fetch_mt5_data(pair, mt5.TIMEFRAME_M15, 96)  # ~24 часа
-        data_30m = fetch_mt5_data(pair, mt5.TIMEFRAME_M30, 48)  # ~24 часа
-        data_1h = fetch_mt5_data(pair, mt5.TIMEFRAME_H1, 240)  # ~10 дней
+        # Загрузка данных для разных таймфреймов
+        data_5m = load_local_data(pair, "5m")
+        data_15m = load_local_data(pair, "15m")
+        data_30m = load_local_data(pair, "30m")
+        data_1h = load_local_data(pair, "1h")
         if any(df is None or df.empty for df in [data_5m, data_15m, data_30m, data_1h]):
             logger.warning(f"Пустые данные для {pair}")
             return None, None, None, None
@@ -229,7 +220,14 @@ async def check_trade_closures(context: ContextTypes.DEFAULT_TYPE):
     updated_trades = []
 
     for trade in open_trades:
-        data = fetch_mt5_data(trade["pair"], mt5.TIMEFRAME_M1, 1440)  # ~1 день
+        def load_local_data(symbol):
+            file = f"data/{symbol}_1m.csv"  # Используем 1m для текущей цены
+            df = pd.read_csv(file)
+            df["time"] = pd.to_datetime(df["time"], unit="s")
+            df.set_index("time", inplace=True)
+            return df[["open", "high", "low", "close", "tick_volume"]].astype(float)
+
+        data = load_local_data(trade["pair"])
         if data is None or data.empty:
             continue
         current_price = data["close"].iloc[-1]
