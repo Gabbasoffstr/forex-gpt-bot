@@ -3,7 +3,6 @@ import logging
 import requests
 import time
 from datetime import datetime, timedelta
-import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 from telegram import Update
@@ -21,15 +20,18 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "ApexBull")
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 
 # Проверка переменных окружения
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в .env")
 if not API_ID or not API_HASH:
     logging.warning("API_ID или API_HASH не заданы, парсинг Telegram будет отключен")
+if not ALPHA_VANTAGE_API_KEY:
+    raise ValueError("ALPHA_VANTAGE_API_KEY не задан в .env")
 
 # Конфигурация
-PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X"]
+PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]  # Убрано "=X" для Alpha Vantage
 START_CAPITAL = 100
 RISK_PER_TRADE = 0.005  # 0.5% риска
 LEVERAGE = 10
@@ -71,22 +73,37 @@ async def parse_telegram_signals(pair):
     try:
         async with TelegramClient('session', API_ID, API_HASH) as client:
             async for message in client.iter_messages(TELEGRAM_CHANNEL, limit=10):
-                if pair.replace("=X", "") in message.text and ("BUY" in message.text or "SELL" in message.text):
+                if pair in message.text and ("BUY" in message.text or "SELL" in message.text):
                     return "BUY" if "BUY" in message.text else "SELL"
         return None
     except Exception as e:
         logger.error(f"Ошибка парсинга Telegram: {e}")
         return None
 
-# Мультитаймфреймовый анализ
+# Мультитаймфреймовый анализ с Alpha Vantage
 def get_intraday_signal(pair):
     try:
+        # Функция для получения данных с Alpha Vantage
+        def fetch_alpha_vantage_data(symbol, interval, period):
+            url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval={interval}&apikey={ALPHA_VANTAGE_API_KEY}&outputsize={period}"
+            response = requests.get(url)
+            data = response.json()
+            if "Time Series (" + interval + ")" not in data:
+                logger.error(f"Ошибка данных Alpha Vantage для {symbol}: {data.get('Note', 'Нет данных')}")
+                return None
+            time_series = data["Time Series (" + interval + ")"]
+            df = pd.DataFrame.from_dict(time_series, orient="index")
+            df.columns = ["open", "high", "low", "close", "volume"]
+            df.index = pd.to_datetime(df.index)
+            df = df.astype(float)
+            return df.sort_index()
+
         # Загрузка данных
-        data_5m = yf.download(pair, period="2d", interval="5m")
-        data_15m = yf.download(pair, period="3d", interval="15m")
-        data_30m = yf.download(pair, period="5d", interval="30m")
-        data_1h = yf.download(pair, period="10d", interval="1h")
-        if any(df.empty for df in [data_5m, data_15m, data_30m, data_1h]):
+        data_5m = fetch_alpha_vantage_data(pair, "5min", "100")  # ~2 дня
+        data_15m = fetch_alpha_vantage_data(pair, "15min", "96")  # ~1.5 дня
+        data_30m = fetch_alpha_vantage_data(pair, "30min", "48")  # ~1 день
+        data_1h = fetch_alpha_vantage_data(pair, "60min", "240")  # ~10 дней
+        if any(df is None or df.empty for df in [data_5m, data_15m, data_30m, data_1h]):
             logger.warning(f"Пустые данные для {pair}")
             return None, None, None, None
 
@@ -112,7 +129,7 @@ def get_intraday_signal(pair):
         last_30m = data_30m.iloc[-1]
         last_1h = data_1h.iloc[-1]
 
-        price = last_5m["Close"]
+        price = last_5m["close"]
         ema20_5m = last_5m["EMA_20"]
         ema50_5m = last_5m["EMA_50"]
         rsi_5m = last_5m["RSI_14"]
@@ -145,7 +162,7 @@ def get_intraday_signal(pair):
 
 # Расчет объема
 def calculate_lot(capital, risk, price, sl_distance, pair):
-    pip_value = 0.0001 if "JPY" not in pair else 0.01
+    pip_value = 0.0001 if "JPY" in pair else 0.01  # Изменено для совместимости с Alpha Vantage
     risk_amount = capital * risk
     lot = risk_amount / (sl_distance * pip_value * price)
     return round(lot * LEVERAGE, 4)
@@ -205,11 +222,11 @@ async def check_trade_closures(context: ContextTypes.DEFAULT_TYPE):
     updated_trades = []
 
     for trade in open_trades:
-        data = yf.download(trade["pair"], period="1d", interval="1m")
-        if data.empty:
+        data = fetch_alpha_vantage_data(trade["pair"], "1min", "1440")  # ~1 день
+        if data is None or data.empty:
             continue
-        current_price = data["Close"].iloc[-1]
-        atr = ta.atr(data["High"], data["Low"], data["Close"], length=14).iloc[-1]
+        current_price = data["close"].iloc[-1]
+        atr = ta.atr(data["high"], data["low"], data["close"], length=14).iloc[-1]
 
         # Трейлинг-стоп
         if trade["signal"] == "BUY" and current_price > trade["price"]:
@@ -217,7 +234,7 @@ async def check_trade_closures(context: ContextTypes.DEFAULT_TYPE):
         elif trade["signal"] == "SELL" and current_price < trade["price"]:
             trade["sl"] = min(trade["sl"], current_price + atr * 1.0)
 
-        pip_value = 0.0001 if "JPY" not in trade["pair"] else 0.01
+        pip_value = 0.0001 if "JPY" in trade["pair"] else 0.01
         if trade["signal"] == "BUY":
             if current_price >= trade["tp"] or current_price <= trade["sl"]:
                 profit = (trade["tp"] - trade["price"]) / pip_value * trade["lot"] if current_price >= trade["tp"] else \
@@ -321,7 +338,7 @@ async def check_signals(context: ContextTypes.DEFAULT_TYPE):
 
         sl_distance = round(atr * 1.5, 5)
         tp_distance = round(sl_distance * 2, 5)
-        pip_factor = 0.0001 if "JPY" not in pair else 0.01
+        pip_factor = 0.0001 if "JPY" in pair else 0.01
         sl = price - sl_distance if signal == "BUY" else price + sl_distance
         tp = price + tp_distance if signal == "BUY" else price - tp_distance
         lot = calculate_lot(capital_per_pair, RISK_PER_TRADE, price, sl_distance / pip_factor, pair)
