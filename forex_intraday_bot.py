@@ -149,13 +149,16 @@ def save_trade(pair, signal, price, sl, tp, lot, profit=0):
         "profit": profit, "timestamp": datetime.utcnow().isoformat()
     }
     try:
-        with open("trades.json", "r") as f:
-            trades = json.load(f)
-    except:
-        trades = []
-    trades.append(trade)
-    with open("trades.json", "w") as f:
-        json.dump(trades, f, indent=2)
+        try:
+            with open("trades.json", "r") as f:
+                trades = json.load(f)
+        except FileNotFoundError:
+            trades = []
+        trades.append(trade)
+        with open("trades.json", "w") as f:
+            json.dump(trades, f, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения сделки: {e}")
 
 # Сохранение открытой сделки
 def save_open_trade(pair, signal, price, sl, tp, lot, signal_id):
@@ -165,13 +168,16 @@ def save_open_trade(pair, signal, price, sl, tp, lot, signal_id):
         "open_time": datetime.utcnow().isoformat()
     }
     try:
-        with open("open_trades.json", "r") as f:
-            trades = json.load(f)
-    except:
-        trades = []
-    trades.append(trade)
-    with open("open_trades.json", "w") as f:
-        json.dump(trades, f, indent=2)
+        try:
+            with open("open_trades.json", "r") as f:
+                trades = json.load(f)
+        except FileNotFoundError:
+            trades = []
+        trades.append(trade)
+        with open("open_trades.json", "w") as f:
+            json.dump(trades, f, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения открытой сделки: {e}")
 
 # Проверка закрытия сделок
 async def check_trade_closures(context: ContextTypes.DEFAULT_TYPE):
@@ -179,7 +185,11 @@ async def check_trade_closures(context: ContextTypes.DEFAULT_TYPE):
     try:
         with open("open_trades.json", "r") as f:
             open_trades = json.load(f)
-    except:
+    except FileNotFoundError:
+        logger.info("Файл open_trades.json не найден")
+        return
+    except Exception as e:
+        logger.error(f"Ошибка чтения open_trades.json: {e}")
         return
 
     closed = []
@@ -214,19 +224,29 @@ async def check_trade_closures(context: ContextTypes.DEFAULT_TYPE):
             else:
                 updated_trades.append(trade)
 
-    with open("open_trades.json", "w") as f:
-        json.dump(updated_trades, f, indent=2)
+    try:
+        with open("open_trades.json", "w") as f:
+            json.dump(updated_trades, f, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка записи open_trades.json: {e}")
 
     for trade, profit in closed:
         save_trade(trade["pair"], trade["signal"], trade["price"], trade["sl"], trade["tp"], trade["lot"], profit)
-        await context.bot.send_message(chat_id=chat_id, text=f"\u2705 Сделка {trade['pair']} закрыта. Прибыль: ${profit:.2f}")
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=f"\u2705 Сделка {trade['pair']} закрыта. Прибыль: ${profit:.2f}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки сообщения: {e}")
 
 # График статистики
 def generate_stats_chart():
     try:
         with open("trades.json", "r") as f:
             trades = json.load(f)
-    except:
+    except FileNotFoundError:
+        logger.info("Файл trades.json не найден")
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка чтения trades.json: {e}")
         return None
 
     labels = [t["timestamp"] for t in trades]
@@ -267,9 +287,13 @@ def generate_stats_chart():
     </body>
     </html>
     """
-    with open("stats_chart.html", "w") as f:
-        f.write(html_content)
-    return "stats_chart.html"
+    try:
+        with open("stats_chart.html", "w") as f:
+            f.write(html_content)
+        return "stats_chart.html"
+    except Exception as e:
+        logger.error(f"Ошибка записи stats_chart.html: {e}")
+        return None
 
 # Проверка сигналов
 async def check_signals(context: ContextTypes.DEFAULT_TYPE):
@@ -306,7 +330,10 @@ async def check_signals(context: ContextTypes.DEFAULT_TYPE):
         last_signal_id[pair] = signal_id
 
     if messages:
-        await context.bot.send_message(chat_id=chat_id, text="\n\n".join(messages))
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="\n\n".join(messages))
+        except Exception as e:
+            logger.error(f"Ошибка отправки сигналов: {e}")
 
 # Команды Telegram
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -328,15 +355,22 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(trades)
         winrate = wins / total * 100 if total else 0
         await update.message.reply_text(f"Сделок: {total}\nПрибыль: ${profit:.2f}\nWinrate: {winrate:.1f}%")
-    except:
+    except FileNotFoundError:
         await update.message.reply_text("Нет данных о сделках.")
+    except Exception as e:
+        logger.error(f"Ошибка чтения статистики: {e}")
+        await update.message.reply_text("Ошибка при загрузке статистики.")
 
 async def stats_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chart_file = generate_stats_chart()
     if chart_file:
-        with open(chart_file, "rb") as f:
-            await update.message.reply_document(document=f, filename="stats_chart.html",
-                                              caption="График прибыли/убытков")
+        try:
+            with open(chart_file, "rb") as f:
+                await update.message.reply_document(document=f, filename="stats_chart.html",
+                                                  caption="График прибыли/убытков")
+        except Exception as e:
+            logger.error(f"Ошибка отправки графика: {e}")
+            await update.message.reply_text("Ошибка при отправке графика.")
     else:
         await update.message.reply_text("Нет данных для графика.")
 
@@ -346,7 +380,7 @@ def main():
     retry_count = 3
     for attempt in range(retry_count):
         try:
-            app = Application.builder().token(BOT_TOKEN).get_updates_timeout(30).build()
+            app = Application.builder().token(BOT_TOKEN).read_timeout(30).build()
             logger.info("Application успешно инициализирован")
             app.add_handler(CommandHandler("start", start))
             app.add_handler(CommandHandler("stats", stats))
@@ -363,6 +397,3 @@ def main():
         except Exception as e:
             logger.error(f"Ошибка инициализации: {e}")
             raise
-
-if __name__ == "__main__":
-    main()
