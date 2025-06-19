@@ -380,12 +380,12 @@ def main():
     retry_count = 3
     for attempt in range(retry_count):
         try:
-            app = Application.builder().token(BOT_TOKEN).read_timeout(30).build()
+            app = Application.builder().token(BOT_TOKEN).build()
             logger.info("Application успешно инициализирован")
             app.add_handler(CommandHandler("start", start))
             app.add_handler(CommandHandler("stats", stats))
             app.add_handler(CommandHandler("stats_chart", stats_chart))
-            app.run_polling(allowed_updates=Update.ALL_TYPES)
+            app.run_polling(poll_interval=1.0, timeout=30, allowed_updates=Update.ALL_TYPES)
             break
         except Conflict as e:
             logger.warning(f"Конфликт getUpdates (попытка {attempt + 1}/{retry_count}): {e}")
