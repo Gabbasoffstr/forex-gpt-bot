@@ -18,8 +18,15 @@ import os
 # Загрузка переменных окружения
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = os.getenv("API_ID")  # Получить на my.telegram.org
-API_HASH = os.getenv("API_HASH")  # Получить на my.telegram.org
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "ApexBull")
+
+# Проверка переменных окружения
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не задан в .env")
+if not API_ID or not API_HASH:
+    logging.warning("API_ID или API_HASH не заданы, парсинг Telegram будет отключен")
 
 # Конфигурация
 PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X"]
@@ -27,7 +34,6 @@ START_CAPITAL = 100
 RISK_PER_TRADE = 0.005  # 0.5% риска
 LEVERAGE = 10
 CHECK_INTERVAL = 300  # 5 минут
-TELEGRAM_CHANNEL = "ApexBull"
 
 # Хранилище сигналов
 last_signals = {pair: None for pair in PAIRS}
@@ -59,6 +65,9 @@ def is_news_time():
 
 # Парсинг Telegram
 async def parse_telegram_signals(pair):
+    if not API_ID or not API_HASH:
+        logger.warning("Парсинг Telegram отключен из-за отсутствия API_ID или API_HASH")
+        return None
     try:
         async with TelegramClient('session', API_ID, API_HASH) as client:
             async for message in client.iter_messages(TELEGRAM_CHANNEL, limit=10):
@@ -319,7 +328,7 @@ async def check_signals(context: ContextTypes.DEFAULT_TYPE):
 
         message = (
             f"\U0001F4B0 Сигнал: {pair}\n"
-            f"Тип: {signal} (подтверждено @ApexBull, мультитаймфрейм)\nЦена: {price:.5f}\nSL: {sl:.5f}\nTP: {tp:.5f}\n"
+            f"Тип: {signal} (подтверждено @{TELEGRAM_CHANNEL}, мультитаймфрейм)\nЦена: {price:.5f}\nSL: {sl:.5f}\nTP: {tp:.5f}\n"
             f"Лот: {lot:.4f} (плечо 1:{LEVERAGE})\nРиск: ${capital_per_pair * RISK_PER_TRADE:.2f}"
         )
         messages.append(message)
@@ -348,13 +357,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_queue.run_repeating(check_signals, interval=CHECK_INTERVAL, first=1, data={"chat_id": chat_id})
     job_queue.run_repeating(check_trade_closures, interval=CHECK_INTERVAL, first=30, data={"chat_id": chat_id})
     await update.message.reply_text("Бот запущен! Проверка сигналов каждые 5 минут.")
-
-        logger.error("Job queue не инициализирован")
-        await update.message.reply_text("Ошибка: Job queue не работает. Проверьте конфигурацию бота.")
-        return
-    context.job_queue.run_repeating(check_signals, interval=CHECK_INTERVAL, first=1, data={"chat_id": chat_id})
-    context.job_queue.run_repeating(check_trade_closures, interval=CHECK_INTERVAL, first=30, data={"chat_id": chat_id})
-    await update.message.reply_text("Бот запущен! Проверка сигналов каждые 5 минут с мультитаймфреймовым анализом.")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
