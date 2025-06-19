@@ -1,6 +1,5 @@
 import json
 import logging
-import requests
 import time
 from datetime import datetime, timedelta
 import pandas as pd
@@ -13,6 +12,7 @@ import asyncio
 import uuid
 from dotenv import load_dotenv
 import os
+import MetaTrader5 as mt5
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -20,18 +20,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "ApexBull")
-ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 
 # Проверка переменных окружения
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в .env")
 if not API_ID or not API_HASH:
     logging.warning("API_ID или API_HASH не заданы, парсинг Telegram будет отключен")
-if not ALPHA_VANTAGE_API_KEY:
-    raise ValueError("ALPHA_VANTAGE_API_KEY не задан в .env")
 
 # Конфигурация
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]  # Убрано "=X" для Alpha Vantage
+PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]
 START_CAPITAL = 100
 RISK_PER_TRADE = 0.005  # 0.5% риска
 LEVERAGE = 10
@@ -45,7 +42,12 @@ last_signal_id = {pair: None for pair in PAIRS}
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Календарь новостей
+# Инициализация MT5
+if not mt5.initialize():
+    logger.error("Ошибка инициализации MetaTrader5")
+    quit()
+
+# Календарь новостей (оставляем как есть)
 def get_economic_calendar():
     try:
         response = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json")
@@ -80,29 +82,25 @@ async def parse_telegram_signals(pair):
         logger.error(f"Ошибка парсинга Telegram: {e}")
         return None
 
-# Мультитаймфреймовый анализ с Alpha Vantage
+# Мультитаймфреймовый анализ с MT5
 def get_intraday_signal(pair):
     try:
-        # Функция для получения данных с Alpha Vantage
-        def fetch_alpha_vantage_data(symbol, interval, period):
-            url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval={interval}&apikey={ALPHA_VANTAGE_API_KEY}&outputsize={period}"
-            response = requests.get(url)
-            data = response.json()
-            if "Time Series (" + interval + ")" not in data:
-                logger.error(f"Ошибка данных Alpha Vantage для {symbol}: {data.get('Note', 'Нет данных')}")
+        # Получение данных для разных таймфреймов
+        def fetch_mt5_data(symbol, timeframe, count):
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+            if not rates:
+                logger.error(f"Нет данных MT5 для {symbol}")
                 return None
-            time_series = data["Time Series (" + interval + ")"]
-            df = pd.DataFrame.from_dict(time_series, orient="index")
-            df.columns = ["open", "high", "low", "close", "volume"]
-            df.index = pd.to_datetime(df.index)
-            df = df.astype(float)
-            return df.sort_index()
+            df = pd.DataFrame(rates)
+            df["time"] = pd.to_datetime(df["time"], unit="s")
+            df.set_index("time", inplace=True)
+            df = df[["open", "high", "low", "close", "tick_volume"]]
+            return df.astype(float)
 
-        # Загрузка данных
-        data_5m = fetch_alpha_vantage_data(pair, "5min", "100")  # ~2 дня
-        data_15m = fetch_alpha_vantage_data(pair, "15min", "96")  # ~1.5 дня
-        data_30m = fetch_alpha_vantage_data(pair, "30min", "48")  # ~1 день
-        data_1h = fetch_alpha_vantage_data(pair, "60min", "240")  # ~10 дней
+        data_5m = fetch_mt5_data(pair, mt5.TIMEFRAME_M5, 100)  # ~8 часов
+        data_15m = fetch_mt5_data(pair, mt5.TIMEFRAME_M15, 96)  # ~24 часа
+        data_30m = fetch_mt5_data(pair, mt5.TIMEFRAME_M30, 48)  # ~24 часа
+        data_1h = fetch_mt5_data(pair, mt5.TIMEFRAME_H1, 240)  # ~10 дней
         if any(df is None or df.empty for df in [data_5m, data_15m, data_30m, data_1h]):
             logger.warning(f"Пустые данные для {pair}")
             return None, None, None, None
@@ -122,6 +120,15 @@ def get_intraday_signal(pair):
         # Индикаторы для 1h
         data_1h.ta.ema(length=200, append=True)
         data_1h.ta.adx(length=14, append=True)
+
+        # Проверка наличия колонок
+        required_columns = {"EMA_20", "EMA_50", "RSI_14", "ATRr_14", "MACD_12_26_9", "EMA_200", "ADX_14"}
+        if not all(col in data_5m.columns for col in {"EMA_20", "EMA_50", "RSI_14", "ATRr_14"}) or \
+           not all(col in data_15m.columns for col in {"MACD_12_26_9"}) or \
+           not all(col in data_30m.columns for col in {"EMA_50"}) or \
+           not all(col in data_1h.columns for col in {"EMA_200", "ADX_14"}):
+            logger.error(f"Отсутствуют необходимые колонки для {pair}")
+            return None, None, None, None
 
         # Последние данные
         last_5m = data_5m.iloc[-1]
@@ -162,7 +169,7 @@ def get_intraday_signal(pair):
 
 # Расчет объема
 def calculate_lot(capital, risk, price, sl_distance, pair):
-    pip_value = 0.0001 if "JPY" in pair else 0.01  # Изменено для совместимости с Alpha Vantage
+    pip_value = 0.0001 if "JPY" in pair else 0.01
     risk_amount = capital * risk
     lot = risk_amount / (sl_distance * pip_value * price)
     return round(lot * LEVERAGE, 4)
@@ -222,7 +229,7 @@ async def check_trade_closures(context: ContextTypes.DEFAULT_TYPE):
     updated_trades = []
 
     for trade in open_trades:
-        data = fetch_alpha_vantage_data(trade["pair"], "1min", "1440")  # ~1 день
+        data = fetch_mt5_data(trade["pair"], mt5.TIMEFRAME_M1, 1440)  # ~1 день
         if data is None or data.empty:
             continue
         current_price = data["close"].iloc[-1]
@@ -406,7 +413,7 @@ async def stats_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Запуск приложения
 def main():
     logger.info(f"Запуск бота с токеном: {BOT_TOKEN[:10]}...")
-    retry_count = 3
+    retry_count = 5
     for attempt in range(retry_count):
         try:
             app = Application.builder().token(BOT_TOKEN).build()
@@ -414,15 +421,18 @@ def main():
             app.add_handler(CommandHandler("start", start))
             app.add_handler(CommandHandler("stats", stats))
             app.add_handler(CommandHandler("stats_chart", stats_chart))
-            app.run_polling(poll_interval=1, timeout=10)
+            app.run_polling(poll_interval=1, timeout=10, allowed_updates=[])
             break
         except Conflict as e:
             logger.warning(f"Конфликт getUpdates (попытка {attempt + 1}/{retry_count}): {e}")
             if attempt < retry_count - 1:
-                time.sleep(5)  # Ждем перед повторной попыткой
+                time.sleep(10)
             else:
                 logger.error("Не удалось устранить конфликт getUpdates")
                 raise
         except Exception as e:
             logger.error(f"Ошибка инициализации: {e}")
             raise
+
+if __name__ == "__main__":
+    main()
