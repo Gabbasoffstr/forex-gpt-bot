@@ -1,7 +1,7 @@
 services:
-  - type: web
+  - type: worker
     name: forex-gpt-bot
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: ./build.sh
     startCommand: python main.py
-    runtime: python3.10
+    runtime: python-3.10

@@ -350,8 +350,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_queue = context.application.job_queue
 
     if job_queue is None:
-        logger.error("Job queue не инициализирован")
-        await update.message.reply_text("Ошибка: очередь задач не работает.")
+        logger.error("Job queue не инициализирован. Убедитесь, что python-telegram-bot установлен с опцией [job-queue].")
+        await update.message.reply_text("Ошибка: очередь задач не работает. Проверьте установку python-telegram-bot.")
         return
 
     job_queue.run_repeating(check_signals, interval=CHECK_INTERVAL, first=1, data={"chat_id": chat_id})
